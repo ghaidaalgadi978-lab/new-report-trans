@@ -1893,7 +1893,7 @@ function parseOcrText(text, startNo){
 }
 
 /* ===== Handwriting / photo reading with Google Gemini vision (free tier, user's own free key) ===== */
-const GEMINI_MODEL = 'gemini-2.0-flash'; // change here if Google renames the free model
+const GEMINI_MODEL = 'gemini-3.8-flash'; // change here if Google renames the free model
 function getApiKey(){ try{ return localStorage.getItem('amos_gemini_key') || ''; }catch(e){ return ''; } }
 function setApiKey(v){ try{ v ? localStorage.setItem('amos_gemini_key', v) : localStorage.removeItem('amos_gemini_key'); }catch(e){} }
 
