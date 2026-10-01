@@ -868,7 +868,7 @@ const DEPT_META = {
   PLUMB:{ar:'سباكة', en:'Plumbing', color:'#3b82f6'},
   CIVIL:{ar:'مدني', en:'Civil', color:'#cbd5e1'},
   ELECT:{ar:'كهرباء', en:'Electrical', color:'#f5a623'},
-  LIFT:{ar:'مصاعد', en:'Lifts', color:'#a855f7'},
+  LIFT:{ar:'مصاعد', en:'Elevator', color:'#a855f7'},
   BMS:{ar:'أنظمة مباني / حريق', en:'BMS / Fire', color:'#10b981'},
   HVAC:{ar:'تكييف', en:'HVAC', color:'#f43f5e'},
   OTHER:{ar:'أخرى', en:'Other', color:'#64748b'}
@@ -1039,7 +1039,7 @@ function normDept(raw){
   if(v.includes('تكييف') || v.includes('تبريد')) return 'HVAC';
   if(v.startsWith('CIVIL')) return 'CIVIL';
   if(v.startsWith('ELECT')) return 'ELECT';
-  if(v.startsWith('LIFT')) return 'LIFT';
+  if(v.startsWith('LIFT') || v.startsWith('ELEVATOR')) return 'LIFT';
   if(v.startsWith('BMS')) return 'BMS';
   if(v.startsWith('HVAC') || v.startsWith('AC')) return 'HVAC';
   return 'OTHER';
@@ -1448,7 +1448,7 @@ function renderLedger(){
       <td><span class="dept-pill edit" ${ed('dept')}>${escHtml(DEPT_META[t.dept] ? DEPT_META[t.dept][currentLang] : t.deptRaw)}</span></td>
       <td class="edit" ${ed('location')}>${escHtml(t.location) || '-'}</td>
       <td class="edit" ${ed('complaint')}>${escHtml(t.complaint) || '-'}</td>
-      <td><span class="pill ${pillClass}">${statusLabel}</span></td>
+      <td><span class="pill ${pillClass} edit" ${ed('status')}>${isOk ? 'OK' : 'STILL'}</span></td>
       <td class="edit" ${ed('note')}>${escHtml(t.note) || '-'}</td>
     </tr>`;
   }).join('');
@@ -1485,6 +1485,9 @@ ledgerBodyEl.addEventListener('focusout', e=>{
     t.dept = deptFromText(txt);
     el.textContent = t.dept !== 'OTHER' ? DEPT_META[t.dept][currentLang] : (txt || DEPT_META.OTHER[currentLang]);
     renderCharts(); renderSummary();
+  }else if(el.dataset.f === 'status'){
+    t.status = /^(OK|تم|منجز|مكتمل|COMPLETED|DONE)/i.test(txt) ? 'OK' : 'STILL';
+    renderKpis(); renderCharts(); renderSummary(); renderTabs(); renderLedger();
   }else{
     t[el.dataset.f] = txt;
     if(!txt) el.textContent = '-';
@@ -1822,7 +1825,7 @@ document.getElementById('exportXlsxBtn').addEventListener('click', async ()=>{
     const isOk = t.status === 'OK';
     const statusLabel = isOk ? dict.tabOk : (isSpr ? dict.tabSpr : dict.tabUnder);
     const row = ws.getRow(7 + idx);
-    const vals = [t.no, t.date || '-', DEPT_META[t.dept] ? DEPT_META[t.dept][currentLang] : t.deptRaw, t.location || '-', t.complaint || '-', statusLabel, t.note || '-'];
+    const vals = [t.no, t.date || '-', DEPT_META[t.dept] ? DEPT_META[t.dept][currentLang] : t.deptRaw, t.location || '-', t.complaint || '-', isOk ? 'OK' : 'STILL', t.note || '-'];
     vals.forEach((v,i)=>{
       const c = row.getCell(i+1);
       c.value = v;
@@ -1920,14 +1923,42 @@ async function visionRead(file, apiKey, startNo){
     'Extract every filled row. Return ONLY a JSON array, no other text. Each item: ' +
     '{"date":"D/M/YYYY Gregorian (use the Gregorian date if both Hijri and Gregorian appear)","dept":"Plumbing|Civil|Electrical|Lift|BMS|HVAC|Other (infer from the fault)","location":"room/unit code such as S229 or F98, empty if none","complaint":"fault description in the original language","status":"OK if done (تم) or STILL if not done (لم يتم)","note":"the reason column, e.g. SPR, else empty"}. ' +
     'If a word is hard to read, give your best reading and append " ?" to it.';
-  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
+  const reqInit = {
     method:'POST',
     headers:{'content-type':'application/json', 'x-goog-api-key': apiKey},
     body: JSON.stringify({
       contents:[{parts:[{inline_data:{mime_type:'image/jpeg', data:b64}}, {text:prompt}]}],
       generationConfig:{responseMimeType:'application/json'}
     })
-  });
+  };
+  // 503/429 = overloaded or rate-limited, 404 = model retired: fall through a list of models,
+  // then add every "flash" model this key can actually use (fetched live) so renames don't break it.
+  const tried = [];
+  let candidates = [GEMINI_MODEL, 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+  let resp = null;
+  for(let round=0; round<2 && !(resp && resp.ok); round++){
+    if(round === 1){
+      try{
+        const lr = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', {headers:{'x-goog-api-key': apiKey}});
+        const ld = await lr.json();
+        candidates = (ld.models||[])
+          .filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent') && /flash/i.test(m.name) && !/image|tts|live|audio|embed|thinking/i.test(m.name))
+          .map(m=>m.name.replace('models/',''))
+          .filter(n=>!tried.includes(n));
+      }catch(e){ candidates = []; }
+    }
+    for(const model of candidates){
+      if(tried.includes(model)) continue;
+      tried.push(model);
+      showBanner(currentLang==='ar' ? `جاري القراءة (${model})...` : `Reading (${model})...`, 'info');
+      for(let attempt=0; attempt<2; attempt++){
+        resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, reqInit);
+        if(resp.status !== 503 && resp.status !== 429) break;
+        await new Promise(r=>setTimeout(r, 2500));
+      }
+      if(resp.ok || (resp.status !== 503 && resp.status !== 429 && resp.status !== 404)) break;
+    }
+  }  if(!resp) throw new Error('No available model');
   if(!resp.ok){
     let detail = ''; try{ detail = (await resp.json()).error.message; }catch(e){}
     throw new Error(`API ${resp.status}${detail ? ': ' + detail : ''}`);
@@ -2012,7 +2043,7 @@ document.getElementById('exportCsvBtn').addEventListener('click', ()=>{
   const header = [dict.colNo, dict.colDate, dict.colDept, dict.colLocation, dict.colComplaint, dict.colStatus, dict.colNote];
   const rows = [header.join(',')];
   list.forEach(t=>{
-    const vals = [t.no, t.date, (DEPT_META[t.dept]?DEPT_META[t.dept][currentLang]:t.deptRaw), t.location, t.complaint, t.status, t.note]
+    const vals = [t.no, t.date, (DEPT_META[t.dept]?DEPT_META[t.dept][currentLang]:t.deptRaw), t.location, t.complaint, t.status === 'OK' ? 'OK' : 'STILL', t.note]
       .map(v => `"${(v||'').toString().replace(/"/g,'""')}"`);
     rows.push(vals.join(','));
   });
